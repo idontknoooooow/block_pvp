@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PvP 3D - Hand Tracking + WebXR</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000;font-family:Arial,sans-serif}
+canvas{display:block}
+#hud{position:fixed;top:12px;left:12px;z-index:20;color:#fff;background:rgba(0,0,0,.72);padding:12px 16px;border-radius:12px;line-height:1.5;min-width:220px}
+#hud .bar{width:190px;height:13px;background:#333;border-radius:8px;overflow:hidden;margin:4px 0 7px}
+#hpbar{height:100%;width:100%;background:#e33}
+#help{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);z-index:20;color:#fff;background:rgba(0,0,0,.75);padding:10px 15px;border-radius:10px;text-align:center;font-size:13px;max-width:92%}
+#status{position:fixed;right:12px;top:12px;z-index:20;color:#fff;background:rgba(0,0,0,.72);padding:10px 13px;border-radius:10px}
+#cameraBox{position:fixed;right:12px;bottom:62px;width:220px;z-index:25;background:#111;border-radius:12px;overflow:hidden;border:1px solid #555}
+#camera{width:100%;display:block;transform:scaleX(-1)}
+#camLabel{color:#fff;text-align:center;font-size:12px;padding:5px}
+#mode{font-weight:bold}
+.overlay{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.88);color:#fff;text-align:center}
+.panel{max-width:680px;width:88%;padding:30px;border-radius:18px;background:#171717;box-shadow:0 10px 50px #000}
+.panel h1{font-size:42px;margin:0 0 12px}.panel p{line-height:1.55;color:#ddd}
+button{border:0;border-radius:10px;padding:13px 22px;font-size:16px;font-weight:bold;cursor:pointer;margin:6px}
+#over{display:none;background:rgba(120,0,0,.92)}
+#flash{position:fixed;inset:0;z-index:50;background:rgba(255,0,0,.28);pointer-events:none;opacity:0;transition:opacity .08s}
+#message{position:fixed;left:50%;top:38%;transform:translate(-50%,-50%);z-index:60;color:#fff;font-size:32px;font-weight:bold;text-shadow:2px 2px #000;opacity:0;pointer-events:none}
+#xrBtn{position:fixed;right:12px;bottom:12px;z-index:40}
+#weaponLabel{position:fixed;right:12px;top:72px;z-index:20;color:#fff;background:rgba(0,0,0,.65);padding:8px 12px;border-radius:10px}
+</style>
+</head>
+<body>
+<div id="hud">
+<b>⚔️ PvP 3D</b><br>
+❤️ Vida: <span id="hp">100</span>
+<div class="bar"><div id="hpbar"></div></div>
+👾 Enemigos: <span id="alive">3</span><br>
+🏆 Puntos: <span id="score">0</span><br>
+⚔️ Ronda: <span id="round">1</span><br>
+🍎 Manzanas: <span id="apples">2</span><br>
+🏹 Flechas: <span id="arrows">10</span>
+</div>
+<div id="status">🖐️ Cámara: esperando...</div>
+<div id="weaponLabel">Arma: ⚔️ Espada</div>
+<div id="help"><span id="mode">PC: WASD + mouse</span> | clic = espada | Q = arco | E = comer manzana | R = reiniciar</div>
+<div id="cameraBox"><video id="camera" autoplay muted playsinline></video><div id="camLabel">Seguimiento de manos</div></div>
+<div id="flash"></div><div id="message"></div>
+<button id="xrBtn" style="display:none">🥽 ENTRAR EN VR</button>
+
+<div id="start" class="overlay">
+ <div class="panel">
+  <h1>⚔️ PvP 3D</h1>
+  <p>Versión ampliada con espada, arco, flechas y manzanas 3D, terreno mejorado, enemigos animados, colisiones, rondas, seguimiento de manos y soporte WebXR.</p>
+  <p><b>Manos en PC:</b> mueve la palma para orientar la cámara y desplazar al personaje; pinza = atacar/agarrar; dos manos = arco; lleva la mano con la manzana hacia la parte superior de la cámara para comer.</p>
+  <p><b>VR:</b> en unas gafas compatibles con WebXR, la cabeza controla la cámara y los controladores/manos controlan las armas.</p>
+  <button id="startBtn">INICIAR JUEGO + CÁMARA</button>
+ </div>
+</div>
+
+<div id="over" class="overlay">
+ <div class="panel">
+  <h1>☠️ PERDISTE</h1>
+  <p>La partida terminó. Debes volver a la ronda 1.</p>
+  <p>Ronda alcanzada: <b id="finalRound">1</b><br>Puntuación: <b id="finalScore">0</b></p>
+  <button id="restartBtn">VOLVER A JUGAR</button>
+ </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+<script>
+"use strict";
+
+let scene,camera,renderer,player,head,sword,bow,arrowVisual,appleVisual;
+let enemies=[],walls=[],projectiles=[],decor=[];
+let started=false,dead=false,vrActive=false;
+let hp=100,score=0,round=1,apples=2,arrows=10;
+let yaw=0,pitch=0,keys={};
+let last=performance.now(),lastEnemyHit=0,lastAttack=0,lastApple=0;
+let handSeen=false,lastPinch=false,handX=.5,handY=.5,handDX=0,handDY=0;
+let handCount=0,twoHands=false,bowDrawing=false,handForward=0,handStrafe=0;
+let weapon="sword",mediaPipeHands=null,mediaPipeCamera=null;
+const speed=.095, PLAYER_RADIUS=.42;
+const $=id=>document.getElementById(id);
+
+function mat(c,metal=0,rough=.8){return new THREE.MeshStandardMaterial({color:c,metalness:metal,roughness:rough})}
+function box(x,y,z,m){return new THREE.Mesh(new THREE.BoxGeometry(x,y,z),m)}
+function cyl(r,h,m){return new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,12),m)}
+function sphere(r,m){return new THREE.Mesh(new THREE.SphereGeometry(r,16,12),m)}
+
+function init(){
+ scene=new THREE.Scene();
+ scene.background=new THREE.Color(0x86c8ef);
+ scene.fog=new THREE.Fog(0x86c8ef,28,75);
+
+ camera=new THREE.PerspectiveCamera(75,innerWidth/innerHeight,.05,100);
+ renderer=new THREE.WebGLRenderer({antialias:true});
+ renderer.setSize(innerWidth,innerHeight);
+ renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+ renderer.xr.enabled=true;
+ document.body.appendChild(renderer.domElement);
+
+ scene.add(new THREE.HemisphereLight(0xffffff,0x526052,1.35));
+ const sun=new THREE.DirectionalLight(0xffffff,1.3); sun.position.set(10,20,8); scene.add(sun);
+
+ buildMap();
+ player=new THREE.Object3D(); player.position.set(0,1.65,9); scene.add(player);
+ head=new THREE.Object3D(); player.add(head); head.add(camera);
+ buildSword(); buildBow(); buildApple();
+ spawnWave();
+
+ addEventListener("resize",resize);
+ addEventListener("keydown",e=>{
+   keys[e.code]=true;
+   if(e.code==="KeyE") eatApple();
+   if(e.code==="KeyQ") toggleWeapon();
+   if(e.code==="KeyR" && dead) restart();
+   if(e.code==="Space" && weapon==="bow") shootArrow();
+ });
+ addEventListener("keyup",e=>keys[e.code]=false);
+ addEventListener("mousemove",e=>{
+   if(document.pointerLockElement===renderer.domElement && started && !dead && !vrActive){
+     yaw-=e.movementX*.0025;
+     pitch-=e.movementY*.0025;
+     pitch=Math.max(-1.45,Math.min(1.45,pitch));
+     player.rotation.y=yaw;
+     camera.rotation.x=pitch;
+   }
+ });
+ renderer.domElement.addEventListener("click",()=>{
+   if(started&&!dead&&!vrActive && document.pointerLockElement!==renderer.domElement){
+     renderer.domElement.requestPointerLock();
+   }
+ });
+ addEventListener("mousedown",e=>{
+   if(e.button===0&&started&&!dead&&!vrActive){
+     renderer.domElement.requestPointerLock();
+     if(weapon==="sword") attack(); else shootArrow();
+   }
+ });
+ $("startBtn").onclick=startGame;
+ $("restartBtn").onclick=restart;
+ $("xrBtn").onclick=enterVR;
+ renderer.xr.addEventListener("sessionstart",()=>{vrActive=true;$("cameraBox").style.display="none";$("status").textContent="🥽 VR activo";});
+ renderer.xr.addEventListener("sessionend",()=>{vrActive=false;});
+ animate();
+}
+
+function buildMap(){
+ const floor=box(32,.5,32,mat(0x4b7d3c)); floor.position.y=-.25; scene.add(floor);
+ // camino
+ const path=box(7,.03,32,mat(0x8a7654)); path.position.y=.02; scene.add(path);
+ // paredes exteriores
+ const stone=mat(0x666b70);
+ addWall(0,2,-16,32,4,1,stone); addWall(0,2,16,32,4,1,stone);
+ addWall(-16,2,0,1,4,32,stone); addWall(16,2,0,1,4,32,stone);
+ // obstáculos
+ addWall(-6,1.4,-2,1.2,2.8,8,stone);
+ addWall(6,1.4,0,8,2.8,1.2,stone);
+ addWall(4,1.4,7,1.2,2.8,7,stone);
+ addWall(-5,1.4,8,5,2.8,1.2,stone);
+
+ // árboles, rocas y antorchas
+ for(let i=0;i<18;i++){
+   let x=(Math.random()>.5?1:-1)*(9+Math.random()*5), z=-14+Math.random()*28;
+   buildTree(x,z);
+ }
+ for(let i=0;i<14;i++){
+   let x=-13+Math.random()*26,z=-13+Math.random()*26;
+   let rock=sphere(.25+Math.random()*.35,mat(0x777777)); rock.scale.y=.65; rock.position.set(x,.25,z); scene.add(rock);
+ }
+}
+
+function addWall(x,y,z,w,h,d,m){
+ const o=box(w,h,d,m);o.position.set(x,y,z);scene.add(o);
+ walls.push(new THREE.Box3().setFromObject(o));
+}
+
+function buildTree(x,z){
+ const g=new THREE.Group();
+ const trunk=cyl(.28,2.2,mat(0x6b4528));trunk.position.y=1.1;g.add(trunk);
+ const crown=sphere(1.05,mat(0x245f2c));crown.position.y=2.45;g.add(crown);
+ const crown2=sphere(.7,mat(0x2f7835));crown2.position.set(.5,2.8,.2);g.add(crown2);
+ g.position.set(x,0,z);scene.add(g);
+ walls.push(new THREE.Box3(new THREE.Vector3(x-.45,0,z-.45),new THREE.Vector3(x+.45,2.3,z+.45)));
+}
+
+function buildSword(){
+ sword=new THREE.Group();
+ const blade=box(.14,1.25,.12,mat(0xe5edf3,.8,.18));blade.position.y=.7;sword.add(blade);
+ const tip=new THREE.ConeGeometry(.1,.25,4);const t=new THREE.Mesh(tip,mat(0xe5edf3,.8,.18));t.position.y=1.42;sword.add(t);
+ const grip=box(.17,.48,.17,mat(0x633a1e));grip.position.y=-.12;sword.add(grip);
+ const guard=box(.56,.1,.18,mat(0xd6a21c,.5,.3));guard.position.y=.14;sword.add(guard);
+ sword.position.set(.68,-.62,-1.05);camera.add(sword);
+}
+
+function buildBow(){
+ bow=new THREE.Group();
+ const wood=mat(0x7a451e,.15,.45),stringMat=mat(0xd8d0bd,0,.6);
+ const arc=new THREE.TorusGeometry(.65,.045,8,32,Math.PI*1.45);
+ const curve=new THREE.Mesh(arc,wood);curve.rotation.z=Math.PI/2;curve.rotation.y=Math.PI/2;bow.add(curve);
+ const top=box(.08,.18,.08,wood);top.position.set(0,.62,0);bow.add(top);
+ const bot=box(.08,.18,.08,wood);bot.position.set(0,-.62,0);bow.add(bot);
+ const string=box(.015,1.28,.015,stringMat);string.position.set(.1,0,0);bow.add(string);
+ bow.position.set(.55,-.42,-1.15);bow.rotation.y=.2;bow.visible=false;camera.add(bow);
+
+ arrowVisual=new THREE.Group();
+ const shaft=cyl(.025,1.35,mat(0x8b5a2b));shaft.rotation.z=Math.PI/2;arrowVisual.add(shaft);
+ const head=new THREE.Mesh(new THREE.ConeGeometry(.07,.18,8),mat(0xcccccc,.7,.2));head.rotation.z=-Math.PI/2;head.position.x=.76;arrowVisual.add(head);
+ arrowVisual.position.set(.55,-.42,-1.05);arrowVisual.rotation.z=Math.PI/2;arrowVisual.visible=false;camera.add(arrowVisual);
+}
+
+function buildApple(){
+ appleVisual=new THREE.Group();
+ const red=mat(0xdca51d,.1,.3);
+ const a=sphere(.22,red);a.scale.set(1,.85,1);appleVisual.add(a);
+ const stem=cyl(.025,.15,mat(0x5b351d));stem.position.y=.23;appleVisual.add(stem);
+ const leaf=sphere(.08,mat(0x28723a));leaf.scale.set(1,.3,.55);leaf.position.set(.09,.25,0);leaf.rotation.z=-.4;appleVisual.add(leaf);
+ appleVisual.position.set(.3,-.35,-.75);appleVisual.visible=false;camera.add(appleVisual);
+}
+
+function spawnWave(){
+ enemies.forEach(e=>scene.remove(e.group));enemies=[];
+ const count=round+2;
+ for(let i=0;i<count;i++){
+   let a=Math.random()*Math.PI*2,r=8+Math.random()*5;
+   let x=Math.cos(a)*r,z=Math.sin(a)*r;
+   if(Math.abs(x)<3&&Math.abs(z)<3)x+=7;
+   spawnEnemy(x,z);
+ }
+ updateHUD();
+}
+
+function spawnEnemy(x,z){
+ const g=new THREE.Group();
+ const skin=mat(0x9c332e),dark=mat(0x462b28),cloth=mat(0x324f7a),metal=mat(0xb9b9b9,.7,.25);
+ const body=box(.9,1.25,.55,cloth);body.position.y=1.05;g.add(body);
+ const head=sphere(.43,skin);head.position.y=2.05;g.add(head);
+ const hair=box(.72,.22,.7,dark);hair.position.set(0,2.37,0);g.add(hair);
+ const eye=mat(0xffffff),pupil=mat(0x111111);
+ [-.16,.16].forEach(ex=>{
+   const e=box(.13,.13,.05,eye);e.position.set(ex,2.08,-.42);g.add(e);
+   const p=box(.05,.07,.03,pupil);p.position.set(ex,2.08,-.45);g.add(p);
+ });
+ const armL=box(.22,.9,.22,skin),armR=box(.22,.9,.22,skin);
+ armL.position.set(-.62,1.12,0);armR.position.set(.62,1.12,0);g.add(armL,armR);
+ const legL=box(.27,.9,.27,dark),legR=box(.27,.9,.27,dark);
+ legL.position.set(-.22,.35,0);legR.position.set(.22,.35,0);g.add(legL,legR);
+ const weaponM=box(.08,.85,.08,metal);weaponM.position.set(.76,.9,-.2);weaponM.rotation.z=-.35;g.add(weaponM);
+ g.position.set(x,0,z);scene.add(g);
+ enemies.push({group:g,hp:60+round*10,max:60+round*10,lastHit:0,speed:.022+round*.002,phase:Math.random()*6.28,arms:[armL,armR],legs:[legL,legR]});
+}
+
+function canMove(p){
+ if(p.x<-14.3||p.x>14.3||p.z<-14.3||p.z>14.3)return false;
+ for(const b of walls){
+   if(p.x>b.min.x-PLAYER_RADIUS&&p.x<b.max.x+PLAYER_RADIUS&&p.z>b.min.z-PLAYER_RADIUS&&p.z<b.max.z+PLAYER_RADIUS)return false;
+ }
+ return true;
+}
+
+function movePlayer(dt){
+ if(!started||dead||vrActive)return;
+ let f=(keys.KeyW?1:0)-(keys.KeyS?1:0);
+ let r=(keys.KeyD?1:0)-(keys.KeyA?1:0);
+ if(handSeen){
+   // La palma desplazada del centro también controla el movimiento.
+   f += handForward;
+   r += handStrafe;
+ }
+ if(!f&&!r)return;
+ const len=Math.hypot(f,r);f/=len;r/=len;
+ const dir=new THREE.Vector3(0,0,-1).applyAxisAngle(new THREE.Vector3(0,1,0),yaw);
+ const right=new THREE.Vector3(1,0,0).applyAxisAngle(new THREE.Vector3(0,1,0),yaw);
+ const p=player.position.clone();
+ p.addScaledVector(dir,f*speed*dt*60);p.addScaledVector(right,r*speed*dt*60);
+ if(canMove(p))player.position.copy(p);
+}
+
+function attack(){
+ const now=performance.now();if(now-lastAttack<350)return;lastAttack=now;
+ sword.rotation.z=-1.55;setTimeout(()=>sword.rotation.z=-.25,130);
+ let best=null,bestD=4;
+ const forward=new THREE.Vector3(0,0,-1).applyQuaternion(player.quaternion);
+ for(const e of enemies){
+   const to=e.group.position.clone().sub(player.position);to.y=0;
+   const d=to.length();if(d>bestD)continue;
+   const dot=forward.dot(to.normalize());
+   if(dot>.15){best=e;bestD=d;}
+ }
+ if(best){
+   best.hp-=35;score+=10;msg("⚔️ ¡GOLPE!");
+   if(best.hp<=0){removeEnemy(best);score+=50;}
+ }
+ updateHUD();
+}
+
+function removeEnemy(e){
+ scene.remove(e.group);enemies=enemies.filter(x=>x!==e);
+ if(enemies.length===0)setTimeout(nextRound,800);
+}
+
+function shootArrow(){
+ if(!started||dead||arrows<=0)return;
+ arrows--;updateHUD();
+ arrowVisual.visible=false;
+ const origin=camera.getWorldPosition(new THREE.Vector3());
+ const dir=new THREE.Vector3(0,0,-1).applyQuaternion(camera.getWorldQuaternion(new THREE.Quaternion())).normalize();
+ const arrow=new THREE.Group();
+ const shaft=cyl(.025,1.15,mat(0x8b5a2b));shaft.rotation.z=Math.PI/2;arrow.add(shaft);
+ const tip=new THREE.Mesh(new THREE.ConeGeometry(.065,.18,8),mat(0xcccccc,.7,.2));tip.rotation.z=-Math.PI/2;tip.position.x=.66;arrow.add(tip);
+ arrow.position.copy(origin).addScaledVector(dir,.8);
+ arrow.quaternion.setFromUnitVectors(new THREE.Vector3(1,0,0),dir);
+ scene.add(arrow);
+ projectiles.push({group:arrow,dir:dir.clone(),life:0});
+ msg("🏹 ¡FLECHA!");
+}
+
+function updateProjectiles(dt){
+ for(let i=projectiles.length-1;i>=0;i--){
+   const p=projectiles[i];p.life+=dt;p.group.position.addScaledVector(p.dir,dt*18);
+   let hit=null;
+   for(const e of enemies){
+     if(p.group.position.distanceTo(e.group.position.clone().add(new THREE.Vector3(0,1.1,0)))<.8){hit=e;break;}
+   }
+   if(hit){hit.hp-=45;score+=20;scene.remove(p.group);projectiles.splice(i,1);if(hit.hp<=0)removeEnemy(hit);}
+   else if(p.life>2.2){scene.remove(p.group);projectiles.splice(i,1);}
+ }
+}
+
+function eatApple(){
+ if(!started||dead||apples<=0||hp>=100)return;
+ apples--;hp=Math.min(100,hp+40);updateHUD();msg("🍎 +40 VIDA");
+}
+
+function nextRound(){
+ if(dead)return;
+ round++;apples=2+Math.floor((round-1)/2);arrows=10+(round-1)*5;hp=100;
+ spawnWave();msg("⭐ RONDA "+round);
+}
+
+function enemyAI(dt){
+ const now=performance.now();
+ for(const e of enemies){
+   const p=e.group.position,target=player.position;
+   const dx=target.x-p.x,dz=target.z-p.z,d=Math.hypot(dx,dz);
+   e.phase+=dt*5;
+   const swing=Math.sin(e.phase)*.35;
+   e.arms[0].rotation.z=swing;e.arms[1].rotation.z=-swing;
+   e.legs[0].rotation.x=swing*.7;e.legs[1].rotation.x=-swing*.7;
+   if(d>1.65){
+     const np=p.clone();np.x+=dx/d*e.speed*dt*60;np.z+=dz/d*e.speed*dt*60;
+     if(canMove(np))e.group.position.copy(np);
+   }else if(now-e.lastHit>700){
+     e.lastHit=now;hp-=Math.max(5,8+Math.floor(round/2));flash();updateHUD();
+     if(hp<=0)lose();
+   }
+   // Solo rota sobre Y: el enemigo no se inclina al acercarse.
+   e.group.rotation.y=Math.atan2(dx,dz);
+ }
+}
+
+function lose(){
+ dead=true;started=false;
+ $("finalRound").textContent=round;$("finalScore").textContent=score;$("over").style.display="flex";
+ if(document.pointerLockElement)document.exitPointerLock();
+}
+
+function resetState(){
+ hp=100;score=0;round=1;apples=2;arrows=10;dead=false;
+ player.position.set(0,1.65,9);yaw=0;pitch=0;
+ spawnWave();updateHUD();
+}
+
+async function startGame(){
+ $("start").style.display="none";started=true;resetState();
+ if(!vrActive)renderer.domElement.requestPointerLock();
+ startCamera();
+ $("xrBtn").style.display=("xr" in navigator)?"block":"none";
+}
+
+function restart(){$("over").style.display="none";startGame()}
+
+function toggleWeapon(){
+ weapon=weapon==="sword"?"bow":"sword";
+ sword.visible=weapon==="sword";
+ bow.visible=weapon==="bow";
+ arrowVisual.visible=weapon==="bow"&&arrows>0;
+ $("weaponLabel").textContent=weapon==="sword"?"Arma: ⚔️ Espada":"Arma: 🏹 Arco";
+ msg(weapon==="bow"?"🏹 ARCO EQUIPADO":"⚔️ ESPADA EQUIPADA");
+}
+
+function updateHUD(){
+ $("hp").textContent=Math.max(0,hp);$("hpbar").style.width=Math.max(0,hp)+"%";
+ $("alive").textContent=enemies.length;$("score").textContent=score;
+ $("round").textContent=round;$("apples").textContent=apples;$("arrows").textContent=arrows;
+}
+
+function msg(t){$("message").textContent=t;$("message").style.opacity=1;setTimeout(()=>$("message").style.opacity=0,500)}
+function flash(){$("flash").style.opacity=1;setTimeout(()=>$("flash").style.opacity=0,130)}
+function resize(){camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)}
+
+async function startCamera(){
+ try{
+   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error("getUserMedia no disponible. Abre el proyecto con http://localhost o GitHub Pages.");
+   const video=$("camera");
+   const stream=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:"user"},audio:false});
+   video.srcObject=stream;
+   mediaPipeHands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+   mediaPipeHands.setOptions({maxNumHands:2,modelComplexity:1,minDetectionConfidence:.6,minTrackingConfidence:.6});
+   mediaPipeHands.onResults(onHands);
+   mediaPipeCamera=new Camera(video,{onFrame:async()=>{await mediaPipeHands.send({image:video})},width:640,height:480});
+   mediaPipeCamera.start();
+   $("status").textContent="🖐️ Cámara: activa";
+ }catch(err){
+   $("status").textContent="⚠️ Cámara no disponible";
+   console.warn("Cámara:",err.name,err.message,err);
+ }
+}
+
+function pinchOf(a,b){
+ return Math.hypot(a.x-b.x,a.y-b.y)<.065;
+}
+
+function onHands(res){
+ if(!res.multiHandLandmarks||!res.multiHandLandmarks.length){
+   handSeen=false;handCount=0;twoHands=false;bowDrawing=false;
+   handForward=0;handStrafe=0;
+   $("status").textContent="🖐️ Cámara activa — buscando manos";
+   $("mode").textContent="PC: WASD + mouse";
+   return;
+ }
+ handSeen=true;handCount=res.multiHandLandmarks.length;twoHands=handCount>=2;
+ const lm=res.multiHandLandmarks[0],center=lm[9];
+ const nx=1-center.x,ny=center.y;
+ handDX=nx-handX;handDY=ny-handY;handX=nx;handY=ny;
+ const thumb=lm[4],index=lm[8],pinch=pinchOf(thumb,index);
+
+ // Movimiento de personaje: desplazar la palma desde el centro.
+ handStrafe=Math.max(-1,Math.min(1,(handX-.5)*1.7));
+ handForward=Math.max(-1,Math.min(1,(handY-.5)*1.7));
+ // Cámara: movimiento relativo de la mano.
+ if(Math.abs(handDX)>.003)yaw-=handDX*2.0;
+ if(Math.abs(handDY)>.003)pitch-=handDY*1.0;
+ pitch=Math.max(-1.25,Math.min(1.25,pitch));
+
+ if(twoHands&&weapon==="bow"){
+   const lm2=res.multiHandLandmarks[1];
+   const p2=pinchOf(lm2[4],lm2[8]);
+   bowDrawing=pinch||p2;
+   if(bowDrawing)arrowVisual.visible=arrows>0;
+ }else bowDrawing=false;
+
+ if(pinch&&!lastPinch&&started&&!dead){
+   if(weapon==="sword")attack();
+   else if(twoHands)shootArrow();
+ }
+ // Manzana: pinza + mano alta = consumir.
+ if(pinch&&handY<.24&&performance.now()-lastApple>800){
+   lastApple=performance.now();eatApple();
+ }
+ lastPinch=pinch;
+
+ // Armas visibles siguiendo la mano.
+ const tx=(handX-.5)*1.5,ty=(.5-handY)*1.0;
+ sword.position.x=.68+tx*.45;sword.position.y=-.62+ty*.3;
+ if(weapon==="bow"){
+   bow.position.x=.55+tx*.25;bow.position.y=-.42+ty*.2;
+   arrowVisual.position.x=.55+tx*.25;arrowVisual.position.y=-.42+ty*.2;
+ }
+ $("status").textContent=twoHands?"🖐️🖐️ Dos manos detectadas":"🖐️ Una mano detectada";
+ $("mode").textContent=twoHands?"GESTOS: dos manos → arco":"GESTOS: palma mueve | 🤏 pinza";
+}
+
+function handAssist(){
+ if(!started||dead||vrActive)return;
+ // Si no hay mano, el mouse conserva el control de la cámara.
+ // Si hay mano, su movimiento puede complementar/sustituir al mouse.
+ if(handSeen){
+   player.rotation.y=yaw;
+   camera.rotation.x=pitch;
+ }
+}
+
+function setupXRControllers(){
+ // Controladores VR: agarre/trigger de la mano derecha = ataque/disparo.
+ for(let i=0;i<2;i++){
+   const c=renderer.xr.getController(i);
+   c.addEventListener("selectstart",()=>{if(started&&!dead){if(weapon==="sword")attack();else shootArrow()}});
+   c.addEventListener("squeezestart",()=>{if(started&&!dead&&weapon==="sword")attack()});
+   scene.add(c);
+ }
+}
+
+async function enterVR(){
+ if(!("xr" in navigator)){msg("Este navegador no ofrece WebXR");return}
+ try{
+   const session=await navigator.xr.requestSession("immersive-vr",{optionalFeatures:["local-floor","bounded-floor","hand-tracking"]});
+   renderer.xr.setSession(session);
+   $("status").textContent="🥽 VR activo — mueve la cabeza para mirar";
+   msg("🥽 ¡MODO VR!");
+ }catch(e){console.warn(e);msg("No se pudo iniciar VR")}
+}
+
+function animate(){
+ renderer.setAnimationLoop(()=>{
+   const now=performance.now(),dt=Math.min(.05,(now-last)/1000);last=now;
+   movePlayer(dt);enemyAI(dt);updateProjectiles(dt);handAssist();
+   if(weapon==="bow"&&!twoHands)arrowVisual.visible=true;
+   if(weapon==="sword")arrowVisual.visible=false;
+   renderer.render(scene,camera);
+ });
+}
+
+init();
+setupXRControllers();
+</script>
+</body>
+</html>
